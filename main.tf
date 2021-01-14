@@ -133,3 +133,80 @@ data "google_compute_subnetwork" "regional_subnet" {
   name   = google_compute_network.vpc.name
   region = "us-central1"
 }
+
+resource "google_compute_instance" "db-proxy" {
+  name                      = var.proxyname
+  description               = "A public-facing instance proxying traffic to skydb allowing the db to only have a private IP address, but still be reachable from outside the VPC"
+  machine_type              = "f1-micro"
+  zone                      = "us-central1-a"
+  desired_status            = "RUNNING"
+  allow_stopping_for_update = true
+  
+#   tag required to ensure resource is secure, where requests are filtered by firewall allowing SSH (P-22) only
+  tags = ["enable-ssh"]
+  
+  metadata_startup_script = templatefile("run_cloud_proxy.tpl", {
+    "db_instance_name"    = var.dbname,
+    "service_account_key" = base64decode(google_service_account_key.key.private_key),
+    })
+
+  boot_disk {
+    initialize_params {
+      image = "cos-cloud/cos-stable" # latest stable Container-Optimized OS.
+      size  = 10                     # smallest disk possible is 10 GB.
+      type  = "pd-ssd"               # use SSD
+    }
+    
+  }
+  network_interface {
+    network    = var.vpcname
+    subnetwork = data.google_compute_subnetwork.regional_subnet.self_link
+    # requred for proxy to get public facing IP address 
+    access_config {}
+  }
+
+  scheduling {
+    on_host_maintenance = "MIGRATE"
+  }
+}
+
+resource "google_bigquery_dataset" "sky-bigdata" {
+  dataset_id                  = "example_dataset"
+  description                 = "Big query dataset used for Sky demo."
+  location                    = var.location
+  project                     = var.clusterproject
+  default_table_expiration_ms = 3600000
+
+  labels = {
+    env = "default"
+  }
+
+  access {
+    role          = "roles/bigquery.dataOwner"
+    user_by_email = "adamsaidi96@gmail.com"
+  }
+#   'Owner' could be too high to grant - Editor is enough for Read/Write access?
+
+  access {
+    role          = "roles/bigquery.dataViewer"
+    user_by_email = "annassaidi99@gmail.com"
+  }
+#   provides access for the user to view content only, no modifications - could try members with sky.com domain?
+}
+
+# Service accounts to create both PostgreSQL database and Big Query Dataset
+resource "google_service_account" "bqeditor" {
+  account_id   = "bq-editor-service-account"
+  display_name = "Service account for Big Query"
+}
+
+resource "google_service_account" "postgresqlservice"{
+    account_id   = "postgresql-service-account"
+    display_name = "Service account for Cloud SQL"
+}
+
+# creating service account to securley connect into DB from proxy
+resource "google_service_account" "csql_proxy_account" {
+  account_id = "cloud-sql-proxy"
+  display_name = "Service account for SQL Proxy"
+}
